@@ -1,0 +1,525 @@
+---
+title: "data science challenge"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+library("MVA")
+library("dplyr")
+library("ggplot2")
+library(plyr)
+library(caret)
+library(glmnet)
+#library(corrplot)
+library(plotmo)
+house.train = read.csv("train.csv",header = T)
+house.test = read.csv('test.csv',header=T)
+test.label = house.test$Id
+house.train$Id = NULL
+house.test$Id = NULL
+house.test$SalePrice = NA
+# check if there's response variable absent in training data
+sum(is.na(house.train$SalePrice))
+sum(is.na(house.test$SalePrice))
+
+
+```
+
+Overall Quality has highest correlation with price
+```{r}
+ggplot(data = house.train, aes(x = house.train$OverallQual, y = house.train$SalePrice))+ geom_point()+scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma)+scale_x_continuous(breaks= seq(0, 10, by=1)) + labs(x = 'overall quality', y = 'Sale Price')
+```
+
+The second highest correlation with saleprice
+```{r}
+ggplot(data = house.train, aes(x = house.train$GrLivArea, y = house.train$SalePrice))+ geom_point()+scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma)
+#drop the outlier based on the graph
+outlier = which(house.train$GrLivArea >4000 & house.train$SalePrice < 300000)
+outlier
+house.train = house.train[-outlier,]
+ggplot(data = house.train, aes(x = house.train$GrLivArea, y = house.train$SalePrice))+ geom_point()+geom_smooth(method = 'lm', se = FALSE)+labs(x = 'above grade (ground) living area square feet',y = 'Sales Price')+scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma)
+```
+
+
+Take neighborhood as an example to draw a grpah
+```{r}
+ggplot(data = house.train, aes(x = house.train$Neighborhood, y = house.train$SalePrice))+ geom_boxplot()+labs(x ='neighborhood', y = 'Sale Price')+scale_y_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma)
+```
+
+
+combine train set and test set
+```{r}
+house = rbind(house.train,house.test)
+```
+
+Preprocessing data and handling NA
+
+In this step we are going to update the data: 
+1) change the type of certain variables.
+
+2) update the data with NA value. Some NA value has reasonable value. For instance, NA in most basement-related variable means no basement. In this case, we change the value from NA to None.
+
+Otherwise, For categorical data, we use the most frequent value. For numerical data, we use the median value.
+
+3) There are two cases that the training data doesn't have certain level of variable that is present in test data. We simply change the level of certain test data to the closest level based on common sense. Specifically: change the value of GarageCars from 5 to 4,and, change the value of MSSubClass from 150(1-1/2 STORY PUD - ALL AGES) to 160 (2-STORY PUD - 1946 & NEWER).
+
+4) Adding predictor: add predictor based on current categorical predictor. For instance, the value of certain 
+```{r message=FALSE}
+
+#MSSubClass: from integer to factor
+
+house$MSSubClass = as.factor(house$MSSubClass)
+#test set has a data with level of 150, but train set doesn't have any data with level of 150. Thus we change certain level from 150(1-1/2 STORY PUD - ALL AGES) to 160 (2-STORY PUD - 1946 & NEWER).
+
+house[which(house$MSSubClass == 150),'MSSubClass'] = 160
+
+
+#MSZoning: factor
+
+# substitute the NA with RL, which is the most frequent value (mode).
+house[is.na(house$MSZoning),'MSZoning'] = 'RL'
+
+#LotFrontage: numeric,has lots of outliers, right skewed
+
+house[is.na(house$LotFrontage),'LotFrontage'] = mean(house$LotFrontage,na.rm = T)
+sum(is.na(house$LotFrontage))
+
+#LotArea:numeric, may useful
+
+#Street: not useful
+
+#Alley
+
+house$Alley= factor(house$Alley,levels = c("Grvl","Pave","None"))
+house[is.na(house$Alley),'Alley'] = 'None'
+
+#LotShape: factor,may useful
+#value: regular, irregular
+
+
+#LandContour: factor: not very useful? 
+
+#Utilities:not useful
+house[is.na(house$Utilities),'Utilities'] = 'AllPub'
+
+
+#LotConfig: factor,may useful
+#insde lot: A lot surrounded on each side by other lots, with road frontage on one side; 
+#a corner lot has road frontage on two sides.
+
+
+#LandSlope: not very useful?
+
+
+#Neighborhood: useful,factor
+
+
+#Condition1,2:may useful
+
+
+#BldgType: factor,
+
+
+#HouseStyle:looks good,factor
+
+#OverallQual,looks good
+#Rates the overall material and finish of the house
+
+#OverallCond: looks good
+#Rates the overall condition of the house
+
+
+#YearBuilt:built a new categorical variable yearbuiltfac based on YearBuilt. 
+str(house$YearBuilt)
+summary(house$YearBuilt)
+house$YearBuiltfac = ifelse(house$YearBuilt < 1950,'<50s',
+                            ifelse(house$YearBuilt<1960,'50s',
+                                   ifelse(house$YearBuilt<1970,'60s',
+                                          ifelse(house$YearBuilt<1980,'70s',
+                                                 ifelse(house$YearBuilt<1990,'80s',
+                                                        ifelse(house$YearBuilt<2000,'90s',
+                                                               '00s'))))))
+house$YearBuiltfac = ordered(house$YearBuiltfac,levels = c('<50s','50s','60s','70s','80s','90s','00s'))
+
+#YearRemodAdd: built a new categorical variable yearremodadd based on YearRemodAdd. 
+str(house$YearRemodAdd)
+summary(house$YearRemodAdd)
+house$YearRemodfac = ifelse(house$YearRemodAdd < 1960,'50s',
+                                   ifelse(house$YearRemodAdd<1970,'60s',
+                                          ifelse(house$YearRemodAdd<1980,'70s',
+                                                 ifelse(house$YearRemodAdd<1990,'80s',
+                                                        ifelse(house$YearRemodAdd<2000,'90s',
+                                                               '00s')))))
+house$YearRemodfac = ordered(house$YearRemodfac,levels = c('50s','60s','70s','80s','90s','00s'))
+
+
+
+#Roofstyle: may useful
+
+#RoofMatl: not useful
+
+
+#Exterior1st/2nd: useful
+
+house[is.na(house$Exterior1st),'Exterior1st'] = 'VinylSd'
+house[is.na(house$Exterior2nd),'Exterior2nd'] = 'VinylSd'
+
+#MasVnrType:may useful
+
+#there is 24 NA value of MasVnrType variable, 23 of them has value NA of MasVnrArea but one has value 198 of MasVnrArea. We decide to change the value from 198 to None.
+house[is.na(house$MasVnrType),]
+house[which((is.na(house$MasVnrType))&
+        (house$MasVnrArea == 198)),'MasVnrArea'] = 'None' 
+house[is.na(house$MasVnrType),'MasVnrType'] = 'None'
+
+
+#MasVnrArea: 
+
+house$MasVnrArea = as.numeric(house$MasVnrArea)
+house[is.na(house$MasVnrArea),'MasVnrArea'] = 0  
+
+
+#ExterQual: looks good
+
+
+#since the quality is ordered categorical variable, switch it to ordinal variable
+house$ExterQual = ordered(house$ExterQual,levels = c('Po','Fa','TA','Gd','Ex'))
+
+
+#ExterCond
+
+house$ExterCond = ordered(house$ExterCond,levels = c('Po','Fa','TA','Gd','Ex'))
+
+
+#Foundation: may useful?
+
+
+#BsmtCond:
+
+
+#some data has NA value of bsmtcond but has normal value of other bsmt variables. 
+#change the value  of cond to the most frequent value (TA)
+house[which(((is.na(house$BsmtCond)) & (!is.na(house$BsmtFinType1)))| ((is.na(house$BsmtCond))&(!is.na(house$BsmtQual)))),'BsmtCond'] = 'TA'
+
+#samething for bsmtQual
+house[which((is.na(house$BsmtQual)) & (!is.na(house$BsmtFinType1))),'BsmtQual'] = 'TA'
+
+#and bsmtExposure
+house[which((is.na(house$BsmtExposure)) & (!is.na(house$BsmtFinType1))),'BsmtExposure'] = "No"
+        
+#and bsmtfintype2
+house[which((is.na(house$BsmtFinType2)) & (!is.na(house$BsmtFinType1))),'BsmtFinType2'] = 'Unf'
+
+#at this point, we can make sure that all NA value in bsmt-type variable refers to "No basement"
+
+#Now change bsmtQual to ordinal factor, and set NA to None
+house$BsmtQual = ordered(house$BsmtQual,levels = c('None','Po','Fa','TA','Gd','Ex'))
+house[is.na(house$BsmtQual),'BsmtQual'] = 'None'
+#may useful 
+
+
+#same thing to cond
+house$BsmtCond = ordered(house$BsmtCond,levels = c('None','Po','Fa','TA','Gd','Ex'))
+house[is.na(house$BsmtCond),'BsmtCond'] = 'None'
+
+
+#and exposure
+house$BsmtExposure = ordered(house$BsmtExposure,levels = c('None','No','Mn','Av','Gd'))
+house[is.na(house$BsmtExposure),'BsmtExposure'] = 'None'
+
+
+#and fintype1/2
+house$BsmtFinType1 = ordered(house$BsmtFinType1,levels = c('None','Unf','LwQ','Rec','BLQ','ALQ','GLQ'))
+house$BsmtFinType2 = ordered(house$BsmtFinType2,levels = c('None','Unf','LwQ','Rec','BLQ','ALQ','GLQ'))
+house[is.na(house$BsmtFinType1),c('BsmtFinType1','BsmtFinType2')] = 'None'                                       
+
+#deal with data that has NA value of BsmtFinSF1/2,unfSF,bsmtSF:
+house[is.na(house$BsmtFinSF1),c('BsmtFinSF1','BsmtFinSF2','BsmtUnfSF','TotalBsmtSF')]= 0
+house[is.na(house$BsmtFullBath),c('BsmtFullBath')]= 0
+house[is.na(house$BsmtHalfBath),c('BsmtHalfBath')]= 0
+
+#change the fullbath/halfbath from numeric variable to ordinal variable
+house$BsmtFullBath = ordered(house$BsmtFullBath,levels = c('0','1','2','3'))
+
+house$BsmtHalfBath = ordered(house$BsmtHalfBath,levels = c('0','1','2'))
+
+#bedroom:
+
+#kitchenquality :1 na 
+house[which(is.na(house$KitchenQual)),'KitchenQual'] = 'TA'
+#functional: 2 na
+house[which(is.na(house$Functional)),'Functional'] = 'Typ'
+
+#electrical: 1 na
+house[which(is.na(house$Electrical)),'Electrical'] = 'SBrkr'
+
+#MoSold
+house$MoSold = factor(house$MoSold)
+
+#Yrsold
+house$YrSold = ordered(house$YrSold)
+
+#saletype: 1 na
+house[which(is.na(house$SaleType)),'SaleType'] = 'WD'
+
+
+#fireplace,fireplacequality
+house$FireplaceQu = factor(house$FireplaceQu,levels = c("Ex","Gd","TA","Fa","Po","None"))
+house[is.na(house$FireplaceQu),'FireplaceQu'] = 'None'
+
+#garage
+
+#
+house %>% filter(is.na(GarageYrBlt))%>% select(GarageType,GarageArea,GarageFinish,GarageYrBlt,GarageCond,GarageCars,GarageQual)
+
+house$GarageType = factor(house$GarageType,levels = c("2Types","Attchd","Basment","BuiltIn","CarPort","Detchd","None"))
+house[is.na(house$GarageType),'GarageType'] = 'None'
+
+
+#GarageYrBlt: there are NAs in this variable. Performing a simple linear regression with YrBlt as a response variable and GarageYrBlt as predictor, the beta estimate is 0.96. Thus, we use the corresponding YrBlt value to predict the value of GarageYrBlt.
+summary(lm(house$YearBuilt~house$GarageYrBlt))
+
+house[which(is.na(house$GarageYrBlt)),'GarageYrBlt'] = house[which(is.na(house$GarageYrBlt)),'YearBuilt']
+
+house$GarageYrBltfac = ifelse(house$GarageYrBlt < 1950,'<50s',
+                            ifelse(house$GarageYrBlt<1960,'50s',
+                                   ifelse(house$GarageYrBlt<1970,'60s',
+                                          ifelse(house$GarageYrBlt<1980,'70s',
+                                                 ifelse(house$GarageYrBlt<1990,'80s',
+                                                        ifelse(house$GarageYrBlt<2000,'90s',
+                                                               '00s'))))))
+
+house$GarageYrBltfac = ordered(house$GarageYrBltfac,levels = c('<50s','50s','60s','70s','80s','90s','00s'))
+summary(house$GarageYrBlt
+        )
+
+
+house$GarageFinish = factor(house$GarageFinish,levels = c("Fin","RFn","Unf","BuiltIn","None"))
+house[is.na(house$GarageFinish),'GarageFinish'] = 'None'
+
+house$GarageQual = factor(house$GarageQual,levels = c("Ex","Gd","TA","Fa","Po","None"))
+house[is.na(house$GarageQual),'GarageQual'] = 'None'
+
+house[c(which(house$GarageType!='None' & is.na(house$GarageCond))),'GarageCond'] = 'TA'
+house$GarageCond = factor(house$GarageCond,levels = c("Ex","Gd","TA","Fa","Po","None"))
+house[is.na(house$GarageCond),'GarageCond'] = 'None'
+
+#garagecar
+
+table(house$GarageCars)
+house[is.na(house$GarageCars),'GarageCars'] = 2
+#new level in test data
+house[which(house$GarageCars==5),'GarageCars'] = 4
+
+house$GarageCars = ordered(house$GarageCars,levels = c('zero'=0,'one'=1,'two'= 2,'three'=3,'four'=4,'five'=5))
+
+#garagearea
+
+summary(house$GarageArea)
+house[is.na(house$GarageArea),'GarageArea']=median(house$GarageArea,na.rm = T)
+
+
+
+#fence:na change to none
+str(house$Fence)
+house$Fence = factor(house$Fence,levels = c("GdPrv","MnPrv","GdWo","MnWw","None"))
+house[is.na(house$Fence),'Fence'] = 'None'
+
+# miscfeature: na change to none
+str(house$MiscFeature)
+house$MiscFeature = factor(house$MiscFeature,levels = c("Elev","Gar2","Othr","Shed","TenC","None"))
+house[is.na(house$MiscFeature),'MiscFeature'] = 'None'
+
+#poolquality:na change to none
+str(house$PoolQC)
+
+house$PoolQC = factor(house$PoolQC,levels = c("Ex","Gd","TA","Fa","None"))
+house[is.na(house$PoolQC),'PoolQC'] = 'None'
+#sort(colSums(is.na(house)))
+
+#remove the unused variable 
+house$GarageYrBlt = NULL
+house$YearBuilt = NULL
+house$YearRemodAdd = NULL
+```
+
+Skewness
+
+The skewness will affect performance of model. If the skewness of certain numeric variable is larger than 1, we will take the log transformation of certain variable.
+```{r}
+
+#house1 = house
+factor.col = c(which(sapply(house,is.factor)))
+for(i in 1:dim(house)[2]){
+  if(!(i %in% factor.col)){
+    if(abs(timeDate::skewness(house[[i]],na.rm = T))>1){
+      house[[i]]=log(house[[i]]+1) #since we have value 0
+      colnames(house)[i] = paste(colnames(house)[i],'log',sep='')
+    }
+  }
+}
+
+```
+
+
+Get rid of variable with low variance
+```{r}
+
+zerovar = nearZeroVar(house)
+house.lowvar = house[,-zerovar]
+
+```
+
+
+The thought of making a coefficient path plot is coming from  https://stats.stackexchange.com/questions/133873/lasso-plot-label-lines-with-names-using-glmnet
+
+Lasso:Use lasso to do model selection. The basic thought is after training a lasso model with multiple value of lambda, we make multiple coefficient path for each variable and remove variable that doesn't meet the requirement. The removal is based on two rules: 1) it enters the path too late. 2) The impact on model is inconsistent.
+
+Below are the training of lasso model and the set up of making coefficient path plot. 
+
+```{r}
+train.set.lasso = house.lowvar[which(!is.na(house$SalePricelog)),]
+test.set.lasso = house.lowvar[which(is.na(house$SalePricelog)),]
+
+#model matrix
+lasso.x = model.matrix(SalePricelog~.,train.set.lasso)[,-1]
+lasso.y = train.set.lasso$SalePricelog
+
+#test model matrix
+
+test.set.lasso$SalePricelog = 0
+lasso.test.x = model.matrix(SalePricelog~.,test.set.lasso)[,-1]
+
+#grid
+#split the sample into a training set and a test set to estimate test error
+set.seed(213)
+lasso.train = sample(1:nrow(lasso.x),nrow(lasso.x)/2)
+
+lasso.test=(-lasso.train)
+lasso.y.test=lasso.y[lasso.test]
+#modeling
+#grid=10^seq(10,-2,length=90)
+lasso.lm = glmnet(lasso.x[lasso.train,],lasso.y[lasso.train],standardize = T,alpha=1)
+# plot(lasso.lm)
+# plot_glmnet(lasso.lm,label=20)
+
+#perform cross-validation and compute test error to choose lambda
+cv.lasso.lm = cv.glmnet(lasso.x[lasso.train,],lasso.y[lasso.train],alpha=1)
+#plot
+lasso.coef=coef(lasso.lm,cv.lasso.lm$lambda.min)
+lasso.coef.inc = dimnames(lasso.coef[lasso.coef[,1]>0,0])[[1]]
+lasso.coef.dec = dimnames(lasso.coef[lasso.coef[,1]<0,0])[[1]]
+
+#set up the plot
+xx= coef(lasso.lm)[,ncol(coef(lasso.lm))]
+xx=xx[which(xx==0)]
+xx = xx[-c(5,7,9,12,17)]
+#names(xx)
+
+ordered.var.name = names(coef(lasso.lm)[,ncol(coef(lasso.lm))][order(coef(lasso.lm)[,ncol(coef(lasso.lm))],decreasing=TRUE)])
+ordered.var.name = setdiff(ordered.var.name,ordered.var.name[which(ordered.var.name%in% names(xx))])
+ordered.var.name = setdiff(ordered.var.name,ordered.var.name[grep("Intercept",ordered.var.name)])
+############################################
+#diagonostic plot
+
+ # for(i in 1: length(ordered.var.name)){
+ #   #pdf(paste(ordered.var.name[i],'.pdf',sep = ''))
+ #   cols = rep(0,length(ordered.var.name))
+ #   name = c(ordered.var.name[i])
+ #   cols[ordered.var.name %in% name] = 'blue'
+ #   plot_glmnet(lasso.lm,label = T,col = cols)
+ #   #dev.off()
+ # }
+ # 
+ # abbr = abbreviate(ordered.var.name,minlength = 8)
+ # names(abbr) = NULL
+ # abbr
+```
+
+After we set up, make a coefficient path for each variable, the scale limit of coefficient estimate is [-2,2]. The x axis at the bottom represents the log lambda.
+```{r}
+for(i in 1:ncol(train.set.lasso)){
+  if(i != 55){
+    cols = rep(0,length(ordered.var.name))
+    curr.name = names(train.set.lasso[i])
+    curr.names = ordered.var.name[grep(paste(curr.name,'*',sep=''),ordered.var.name)]
+    cols[ordered.var.name %in% curr.names]='blue'
+    plot_glmnet(lasso.lm,label = T,col = cols,ylim=c(-0.2,0.2),xlab = curr.name)
+  }
+}
+
+```
+
+Based on the graph we decide to remove 20 variables. Using the trimmed dataset, we obtain the lambda value that minimizes the mean sum of square 
+```{r}
+trim = c('GarageArea','GarageFinish','TotRmsAbvGrd','BedroomAbvGr','BsmtHalfBath',
+         'Electrical','BsmtUnfSF','BsmtFinSF1log','MasVnrArealog','MasVnrType','LotFrontagelog','WoodDeckSFlog','RoofStyle','HouseStyle',
+         'X2ndFlrSF','GarageQual','YrSold','YearRemodfac','LotShape','ExterQual')
+train.set.lasso.trim = train.set.lasso[,!(colnames(test.set.lasso)%in%trim)]
+test.set.lasso.trim = test.set.lasso[,!(colnames(test.set.lasso)%in%trim)]
+
+#model matrix
+lasso.x.trim = model.matrix(SalePricelog~.,train.set.lasso.trim)[,-1]
+lasso.y.trim = train.set.lasso.trim$SalePricelog
+
+#test model matrix
+
+test.set.lasso.trim$SalePricelog = 0
+lasso.test.x.trim = model.matrix(SalePricelog~.,test.set.lasso.trim)[,-1]
+
+#use CV to calculate optimal value of lambda.
+cv.lasso.lm.trim = cv.glmnet(lasso.x.trim[lasso.train,],lasso.y.trim[lasso.train],alpha=1)
+
+```
+
+As the visualization suggests, the MSE varies very little within 1 SE of estimated optimal value of lambda.
+ Thus we decide to make two model, one with estimated optimal value of lambda, another with lambda that 1 SE away from optimal lambda. 
+```{r}
+plot(cv.lasso.lm.trim)
+min.lamb.trim = cv.lasso.lm.trim$lambda.min
+se1.lamb.trim = cv.lasso.lm.trim$lambda.1se
+
+```
+
+
+```{r}
+
+#fit model with lambda that gives cvm(mean cross-validated error)
+lasso.outcome.trim = glmnet(lasso.x.trim,lasso.y.trim,alpha=1)
+lasso.coef.trim=predict(lasso.outcome.trim,type='coefficients',s=min.lamb.trim);
+#make a prediction on test data
+lasso.predictout.trim = predict(lasso.outcome.trim,s=min.lamb.trim,newx=lasso.test.x.trim)
+lasso.exp.trim = exp(lasso.predictout.trim)
+outcome.lasso.trim = data.frame(Id = test.label, SalePrice = lasso.exp.trim)
+colnames(outcome.lasso.trim)[2] = 'SalePrice'
+head(outcome.lasso.trim)
+#output it 
+write.csv(outcome.lasso.trim,'outcome.lasso.final.minlambda.trim.csv',row.names = F)
+
+#fit model with maximum lambda within 1 se of lambda that gives minimum cvm
+lasso.coef.trim.se=predict(lasso.outcome.trim,type='coefficients',s=se1.lamb.trim);
+
+
+#make a prediction on test data
+lasso.predictout.trim.se = predict(lasso.outcome.trim,s=se1.lamb.trim,newx=lasso.test.x.trim)
+
+lasso.exp.trim.se = exp(lasso.predictout.trim.se)
+outcome.lasso.trim.se = data.frame(Id = test.label, SalePrice = lasso.exp.trim.se)
+colnames(outcome.lasso.trim.se)[2] = 'SalePrice'
+head(outcome.lasso.trim.se)
+#output it 
+write.csv(outcome.lasso.trim.se,'outcome.lasso.final.se1lambda.trim.csv',row.names = F)
+
+```
+
+The test score* provided by Kaggle.com suggests that model with 1se lambda (0.118) is better than model with optimal lambda(0.126)
+
+*the score is Root Mean Square Log Error
+
+Take a look at the coefficient of variable that fits the better model
+```{r}
+#extract the variable name and corresponding coefficient 
+lasso.se.coef.df = data.frame(name = lasso.coef.trim.se@Dimnames[[1]][lasso.coef.trim.se@i + 1], coefficient = lasso.coef.trim.se@x)
+print(lasso.coef.trim.se)
+```
